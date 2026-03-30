@@ -1,0 +1,157 @@
+# Scrapes product data from multiple Shopify stores and exports to Excel.
+# One sheet per store + a combined sheet with all products.
+
+import requests
+from openpyxl import Workbook
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+import time
+
+
+def format_columns(ws):
+    # Auto-fit column widths based on content, capped at 50
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
+
+# --- Get store URLs from user ---
+stores = []
+print('Enter Shopify store URLs one by one. Press Enter with no URL when done.')
+while True:
+    url = input('Enter URL: ').strip()
+    if url == '':
+        break
+    stores.append(url)
+
+
+# --- Scrape each store ---
+all_products_data = []
+
+for store in stores:
+    all_products = []
+    page = 1
+
+    while True:
+        url = store.rstrip('/') + f'/products.json?limit=250&page={page}'
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                print(f'Could not access {url} - status code {response.status_code}')
+                break
+            data = response.json()
+            if 'products' not in data:
+                print(f'{store} does not appear to be a valid Shopify store')
+                break
+        except Exception as e:
+            print(f'Error accessing {store}: {e}')
+            break
+
+        products = data['products']
+        all_products.extend(products)
+        print(f'Page {page}: got {len(products)} products')
+
+        if len(products) < 250:
+            break
+
+        page += 1
+        time.sleep(0.3)
+
+    print(f'Total products for {store}: {len(all_products)}')
+
+    for product in all_products:
+        # Price range across all variants
+        if product['variants']:
+            prices = [float(v['price']) for v in product['variants']]
+            price_from = min(prices)
+            price_to = max(prices)
+        else:
+            price_from = ''
+            price_to = ''
+
+        # Strip HTML tags from description
+        soup = BeautifulSoup(product['body_html'] or '', 'html.parser')
+        description = soup.get_text(separator=' ').strip()
+
+        # Available if at least one variant is in stock
+        available = any(v['available'] for v in product['variants'])
+
+        try:
+            image = product['images'][0]['src']
+        except:
+            image = 'NOT FOUND'
+
+        tags = ', '.join(product['tags'])
+
+        all_products_data.append({
+            'store': store,
+            'title': product['title'],
+            'vendor': product['vendor'],
+            'product_type': product['product_type'],
+            'description': description,
+            'price_from': price_from,
+            'price_to': price_to,
+            'available': available,
+            'image': image,
+            'tags': tags
+        })
+
+
+# --- Write to Excel ---
+wb = Workbook()
+ws = wb.active
+ws.title = 'All Products'
+
+headers = ['Store', 'Title', 'Vendor', 'Product Type', 'Description', 'Min Price', 'Max Price', 'Available', 'Image', 'Tags']
+ws.append(headers)
+
+for prod in all_products_data:
+    ws.append([
+        prod['store'],
+        prod['title'],
+        prod['vendor'],
+        prod['product_type'],
+        prod['description'],
+        prod['price_from'],
+        prod['price_to'],
+        prod['available'],
+        prod['image'],
+        prod['tags']
+    ])
+
+format_columns(ws)
+
+# One sheet per store
+for store in stores:
+    domain = urlparse(store).netloc.replace('www.', '')
+    try:
+        ws_store = wb.create_sheet(title=domain)
+    except:
+        ws_store = wb.create_sheet(title=domain + '_2')
+
+    ws_store.append(headers)
+
+    store_products = [p for p in all_products_data if p['store'] == store]
+
+    for prod in store_products:
+        ws_store.append([
+            prod['store'],
+            prod['title'],
+            prod['vendor'],
+            prod['product_type'],
+            prod['description'],
+            prod['price_from'],
+            prod['price_to'],
+            prod['available'],
+            prod['image'],
+            prod['tags']
+        ])
+
+    format_columns(ws_store)
+
+wb.save('shopify_scraped.xlsx')
+print('Done')
